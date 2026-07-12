@@ -13,7 +13,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .api import MarstekAPIError, MarstekUDPClient
-from .compatibility import CompatibilityMatrix
+from .compatibility import CompatibilityMatrix, HW_VERSION_VENUS_A
 from .const import (
     COMMAND_MAX_ATTEMPTS,
     COMMAND_TIMEOUT,
@@ -494,6 +494,53 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
                 data["es"] = es_status
                 self.category_last_updated["es"] = time.time()
                 had_success = True
+
+            # Venus A firmware always reports pv_power=0 in ES.GetStatus and omits
+            # bat_power entirely. Poll the PV strings every update and derive both
+            # fields so the power/state/solar sensors work on this model.
+            if es_status and self.compatibility.hardware_version == HW_VERSION_VENUS_A:
+                try:
+                    await asyncio.sleep(_command_delay())  # Delay between API calls
+                    pv_status = await self.api.get_pv_status(**_command_kwargs())
+                except Exception as err:
+                    _LOGGER.debug("Failed to get PV status: %s", err)
+                    pv_status = None
+
+                if pv_status:
+                    # Scale per-string power at receipt (same pattern as the
+                    # battery_status fields below) so sensors and the stale
+                    # fallback path always see final W values.
+                    for n in range(1, 5):
+                        key = f"pv{n}_power"
+                        if key in pv_status:
+                            pv_status[key] = self.compatibility.scale_value(
+                                pv_status[key], "pv_string_power"
+                            )
+                    data["pv"] = pv_status
+                    self.category_last_updated["pv"] = time.time()
+                    had_success = True
+                else:
+                    # Venus A silently drops a large share of requests;
+                    # fall back to the last known (already scaled) string data
+                    pv_status = data.get("pv")
+
+                if pv_status:
+                    known_powers = []
+                    for n in range(1, 5):
+                        string_power = pv_status.get(f"pv{n}_power")
+                        if isinstance(string_power, (int, float)):
+                            known_powers.append(string_power)
+                    if known_powers:
+                        es_status["pv_power"] = sum(known_powers)
+
+                if "bat_power" not in es_status:
+                    ongrid_power = es_status.get("ongrid_power")
+                    if ongrid_power is not None:
+                        pv_power = es_status.get("pv_power") or 0
+                        offgrid_power = es_status.get("offgrid_power") or 0
+                        # Charging positive: PV and grid import feed the battery,
+                        # on-/off-grid output drains it (ongrid is negative on import)
+                        es_status["bat_power"] = pv_power - ongrid_power - offgrid_power
 
             try:
                 await asyncio.sleep(_command_delay())  # Delay between API calls

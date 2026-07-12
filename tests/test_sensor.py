@@ -1,8 +1,11 @@
 """Tests for per-model sensor gating and the per-string PV descriptions."""
 from types import SimpleNamespace
 
+import pytest
+
 from custom_components.marstek_local_api.compatibility import CompatibilityMatrix
 from custom_components.marstek_local_api.sensor import (
+    EnergyIntegrator,
     PV_STRING_SENSOR_TYPES,
     SENSOR_TYPES,
     VENUS_A_UNSUPPORTED_KEYS,
@@ -59,3 +62,37 @@ def test_pv_string_value_fns_bind_their_own_key():
 
 def test_pv_string_value_fn_handles_missing_data():
     assert PV_STRING_SENSOR_TYPES[0].value_fn({}) is None
+
+
+class TestEnergyIntegrator:
+    """Left-Riemann accumulation with gap and None handling."""
+
+    def test_accumulates_left_riemann(self):
+        integ = EnergyIntegrator(max_gap_seconds=180)
+        integ.add_sample(100.0, 1000.0)
+        # 100 W held for 60 s = 1.667 Wh, regardless of the new sample's value
+        assert integ.add_sample(500.0, 1060.0) == pytest.approx(100 * 60 / 3600)
+        # 500 W held for another 60 s
+        assert integ.add_sample(0.0, 1120.0) == pytest.approx((100 + 500) * 60 / 3600)
+
+    def test_gap_longer_than_max_is_skipped(self):
+        integ = EnergyIntegrator(max_gap_seconds=180)
+        integ.add_sample(100.0, 1000.0)
+        # 10-minute gap (restart / device offline): no accumulation
+        assert integ.add_sample(100.0, 1600.0) == 0.0
+        # but integration resumes afterwards
+        assert integ.add_sample(100.0, 1660.0) == pytest.approx(100 * 60 / 3600)
+
+    def test_none_power_pauses_accumulation(self):
+        integ = EnergyIntegrator(max_gap_seconds=180)
+        integ.add_sample(None, 1000.0)
+        assert integ.add_sample(100.0, 1060.0) == 0.0
+        assert integ.add_sample(None, 1120.0) == pytest.approx(100 * 60 / 3600)
+        # stale sample contributed nothing further
+        assert integ.add_sample(100.0, 1180.0) == pytest.approx(100 * 60 / 3600)
+
+    def test_non_positive_elapsed_ignored(self):
+        integ = EnergyIntegrator(max_gap_seconds=180)
+        integ.add_sample(100.0, 1000.0)
+        assert integ.add_sample(100.0, 1000.0) == 0.0
+        assert integ.add_sample(100.0, 990.0) == 0.0

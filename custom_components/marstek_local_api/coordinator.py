@@ -372,6 +372,27 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
             return None
         return int(time.time() - self.last_message_timestamp)
 
+    def _category_poll_multiplier(self, category: str) -> int:
+        """Return the polling tier of a category in multiples of the base interval.
+
+        Must mirror the tiers in _async_update_data: em/mode (and pv on
+        Venus D) are only polled every UPDATE_INTERVAL_MEDIUM cycles, so
+        their staleness window has to be based on that cadence, not the
+        base update interval.
+        """
+        if category in ("es", "battery"):
+            return UPDATE_INTERVAL_FAST
+        if category in ("em", "mode"):
+            return UPDATE_INTERVAL_MEDIUM
+        if category == "pv":
+            # Venus A polls PV every fast cycle to derive battery power;
+            # computed dynamically because the model can change at runtime
+            # (_update_device_version).
+            if self.compatibility.hardware_version == HW_VERSION_VENUS_A:
+                return UPDATE_INTERVAL_FAST
+            return UPDATE_INTERVAL_MEDIUM
+        return 1
+
     def is_category_fresh(self, category: str) -> bool:
         """Check if category data is fresh enough to display.
 
@@ -393,8 +414,12 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
         last_update = self.category_last_updated[category]
         elapsed = time.time() - last_update
 
-        # Calculate max age (update interval * threshold)
-        max_age = self.update_interval.total_seconds() * self.STALENESS_THRESHOLD
+        # Calculate max age (polling tier interval * threshold)
+        max_age = (
+            self.update_interval.total_seconds()
+            * self._category_poll_multiplier(category)
+            * self.STALENESS_THRESHOLD
+        )
 
         return elapsed < max_age
 

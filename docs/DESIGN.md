@@ -2,10 +2,10 @@
 
 ## Overview
 
-Home Assistant integration for Marstek energy storage systems using the official Local API (Rev 1.0). Provides comprehensive monitoring and control of Marstek Venus C/D/E devices without requiring cloud connectivity or additional hardware.
+Home Assistant integration for Marstek energy storage systems using the official Local API (Rev 1.0). Provides comprehensive monitoring and control of Marstek Venus A/C/D/E devices without requiring cloud connectivity or additional hardware.
 
 **Version:** 1.0
-**Target Devices:** Venus C, Venus D, Venus E
+**Target Devices:** Venus A, Venus C, Venus D, Venus E
 **Protocol:** JSON over UDP (port 30000+)
 **Requirements:** Local API enabled in Marstek app
 
@@ -119,14 +119,30 @@ marstek_local_api/
 - Available Capacity: `(100 - SOC) × rated_capacity / 100` (Wh)
 - Battery State: `charging` / `discharging` / `idle` (based on bat_power)
 
-### 3.5 PV (Photovoltaic) - Venus D Only
+### 3.5 PV (Photovoltaic) - Venus D and Venus A
 **Method:** `PV.GetStatus`
+
+Venus D response (single MPPT summary):
 
 | Field | Type | Sensor | Description |
 |-------|------|--------|-------------|
 | pv_power | number | ✅ Sensor | Solar charging power (W) |
 | pv_voltage | number | ✅ Sensor | Solar voltage (V) |
 | pv_current | number | ✅ Sensor | Solar current (A) |
+
+Venus A response (per string, observed on fw 148):
+
+| Field | Type | Sensor | Description |
+|-------|------|--------|-------------|
+| pv1_power … pv4_power | number | ✅ Sensor | String power in **deci-W** (scaled ÷10 by the compatibility matrix) |
+| pv1_voltage … pv4_voltage | number | ✅ Sensor | String voltage (V) |
+| pv1_current … pv4_current | number | ❌ | Unit inconsistent between strings on current firmware — not exposed |
+| pv1_state … pv4_state | number | ❌ | 1 = string active, 0 = inactive |
+
+On Venus A the coordinator polls PV on the fast tier (every update): the string
+sum replaces the always-zero `es.pv_power`, and battery power is derived as
+`pv_power - ongrid_power - offgrid_power` because `ES.GetStatus` omits
+`bat_power` on this model.
 
 ### 3.6 ES (Energy System)
 **Method:** `ES.GetStatus`
@@ -420,6 +436,10 @@ Options:
 | Venus C | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
 | Venus E | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
 | Venus D | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
+| Venus A | ✅ | ✅ | ✅ | ✅ (no voltage/current/error_code) | ✅ (per string) | ✅ (no bat_power; pv/load energy always 0) | ✅ (no parse_state) |
+
+Venus A reports plain units (W / Wh / °C) for every field; its per-string PV
+power is deci-W. See the `"A"` hardware profile in `compatibility.py`.
 
 ---
 

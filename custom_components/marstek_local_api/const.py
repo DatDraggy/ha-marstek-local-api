@@ -113,4 +113,4 @@ WEEKDAY_MAP: Final = {
     "sun": 64,  # 1000000
 }
 WEEKDAYS_ALL: Final = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
-MAX_SCHEDULE_SLOTS: Final = 10  # Venus C/E supports slots 0-9
+MAX_SCHEDULE_SLOTS: Final = 10  # Venus C/E support slots 0-9 (verified on Venus A fw 148 as well)

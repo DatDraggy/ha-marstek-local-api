@@ -59,6 +59,10 @@ ERROR_INVALID_PARAMS: Final = -32602
 ERROR_INTERNAL_ERROR: Final = -32603
 
 # Device models
+# NOTE: Venus A firmware reports "Venus A" (with a space) in Marstek.GetDevice,
+# so model checks must go through compatibility.parse_hardware_version()
+# rather than comparing against these constants directly.
+DEVICE_MODEL_VENUS_A: Final = "VenusA"
 DEVICE_MODEL_VENUS_C: Final = "VenusC"
 DEVICE_MODEL_VENUS_D: Final = "VenusD"
 DEVICE_MODEL_VENUS_E: Final = "VenusE"

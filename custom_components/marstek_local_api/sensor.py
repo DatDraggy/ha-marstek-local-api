@@ -4,8 +4,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 import logging
+import time
 
 from homeassistant.components.sensor import (
+    RestoreSensor,
     SensorDeviceClass,
     SensorEntity,
     SensorEntityDescription,
@@ -454,6 +456,65 @@ VENUS_A_ZERO_COUNTER_KEYS = {
 }
 
 
+class EnergyIntegrator:
+    """Accumulate energy (Wh) from periodic power samples (left Riemann sum).
+
+    Gaps longer than max_gap_seconds (missed polls, restarts) and samples
+    without a power value are not accumulated.
+    """
+
+    def __init__(self, max_gap_seconds: float) -> None:
+        self._max_gap = max_gap_seconds
+        self._last_power: float | None = None
+        self._last_ts: float | None = None
+        self.energy_wh: float = 0.0
+
+    def add_sample(self, power_w: float | None, timestamp: float) -> float:
+        """Add a power sample and return the accumulated energy in Wh."""
+        if self._last_power is not None and self._last_ts is not None:
+            elapsed = timestamp - self._last_ts
+            if 0 < elapsed <= self._max_gap:
+                self.energy_wh += self._last_power * elapsed / 3600.0
+        self._last_power = power_w if isinstance(power_w, (int, float)) else None
+        self._last_ts = timestamp
+        return self.energy_wh
+
+
+# Venus A firmware hardcodes total_pv_energy to 0, and its grid counters miss
+# energy charged from the MPPT inputs, so solar and battery charge/discharge
+# energy are accumulated from the derived powers instead (persisted via
+# RestoreSensor). These feed the energy dashboard's solar and battery sections.
+INTEGRATED_ENERGY_SENSOR_TYPES: tuple[MarstekSensorEntityDescription, ...] = (
+    MarstekSensorEntityDescription(
+        key="pv_energy_integrated",
+        name="Integrated solar energy",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda data: data.get("es", {}).get("pv_power"),
+        category="es",
+    ),
+    MarstekSensorEntityDescription(
+        key="battery_energy_in_integrated",
+        name="Integrated charged energy",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda data: max(0, data.get("es", {}).get("bat_power", 0) or 0),
+        category="es",
+    ),
+    MarstekSensorEntityDescription(
+        key="battery_energy_out_integrated",
+        name="Integrated discharged energy",
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        device_class=SensorDeviceClass.ENERGY,
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda data: max(0, -(data.get("es", {}).get("bat_power", 0) or 0)),
+        category="es",
+    ),
+)
+
+
 def _standard_sensor_types(
     coordinator: MarstekDataUpdateCoordinator,
 ) -> tuple[MarstekSensorEntityDescription, ...]:
@@ -660,6 +721,17 @@ async def async_setup_entry(
                             device_data=device_data,
                         )
                     )
+                # Venus A firmware has no usable energy counters - integrate them
+                for description in INTEGRATED_ENERGY_SENSOR_TYPES:
+                    entities.append(
+                        MarstekMultiDeviceIntegratedEnergySensor(
+                            coordinator=coordinator,
+                            device_coordinator=device_coordinator,
+                            entity_description=description,
+                            device_mac=mac,
+                            device_data=device_data,
+                        )
+                    )
 
         # Add aggregate/system sensors
         # Create a synthetic unique ID for the system device
@@ -708,6 +780,15 @@ async def async_setup_entry(
                         entry=entry,
                     )
                 )
+            # Venus A firmware has no usable energy counters - integrate them
+            for description in INTEGRATED_ENERGY_SENSOR_TYPES:
+                entities.append(
+                    MarstekIntegratedEnergySensor(
+                        coordinator=coordinator,
+                        entity_description=description,
+                        entry=entry,
+                    )
+                )
 
     async_add_entities(entities)
 
@@ -740,6 +821,10 @@ class MarstekSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
+        return self._fresh_value()
+
+    def _fresh_value(self):
+        """Return the described value, or None while its category is stale."""
         if not self.entity_description.value_fn:
             return None
 
@@ -794,6 +879,10 @@ class MarstekMultiDeviceSensor(CoordinatorEntity, SensorEntity):
     @property
     def native_value(self):
         """Return the state of the sensor."""
+        return self._fresh_value()
+
+    def _fresh_value(self):
+        """Return the described value, or None while its category is stale."""
         if not self.entity_description.value_fn:
             return None
 
@@ -855,3 +944,59 @@ class MarstekAggregateSensor(CoordinatorEntity, SensorEntity):
         # Keep entity available if we have any aggregate data (prevents "unknown" on transient failures)
         aggregates = self.coordinator.data.get("aggregates", {})
         return aggregates is not None and len(aggregates) > 0
+
+
+class MarstekIntegratedEnergyMixin(RestoreSensor):
+    """Accumulate a power reading into a persistent energy total.
+
+    Concrete classes must set self._integrator and provide _fresh_value()
+    returning the current source power in W (or None while stale).
+    """
+
+    _integrator: EnergyIntegrator
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the accumulated total from the previous run."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_sensor_data()
+        if last is not None and last.native_value is not None:
+            try:
+                self._integrator.energy_wh = float(last.native_value) * 1000.0
+            except (TypeError, ValueError):
+                pass
+
+    def _handle_coordinator_update(self) -> None:
+        """Integrate the source power on every coordinator update."""
+        self._integrator.add_sample(self._fresh_value(), time.time())
+        super()._handle_coordinator_update()
+
+    @property
+    def native_value(self):
+        """Return the accumulated energy in kWh."""
+        return round(self._integrator.energy_wh / 1000.0, 3)
+
+
+class MarstekIntegratedEnergySensor(MarstekIntegratedEnergyMixin, MarstekSensor):
+    """Integrated energy sensor (single-device mode)."""
+
+    def __init__(self, coordinator, entity_description, entry) -> None:
+        """Initialize the sensor."""
+        super().__init__(coordinator, entity_description, entry)
+        max_gap = coordinator.update_interval.total_seconds() * 3
+        self._integrator = EnergyIntegrator(max_gap)
+
+
+class MarstekMultiDeviceIntegratedEnergySensor(
+    MarstekIntegratedEnergyMixin, MarstekMultiDeviceSensor
+):
+    """Integrated energy sensor (multi-device mode)."""
+
+    def __init__(
+        self, coordinator, device_coordinator, entity_description, device_mac, device_data
+    ) -> None:
+        """Initialize the sensor."""
+        super().__init__(
+            coordinator, device_coordinator, entity_description, device_mac, device_data
+        )
+        max_gap = device_coordinator.update_interval.total_seconds() * 3
+        self._integrator = EnergyIntegrator(max_gap)

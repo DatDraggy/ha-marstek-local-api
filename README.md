@@ -88,6 +88,7 @@ After setup you can return to **Settings → Devices & Services → Marstek Loca
 | **Mode** | `operating_mode` | text | Current mode (read-only sensor) | 5x | 300 |
 | **PV (Venus D only)** | `pv_power`, `pv_voltage`, `pv_current` | W / V / A | MPPT telemetry | 5x | 300 |
 | **PV strings (Venus A only)** | `pv1_power` … `pv4_power`, `pv1_voltage` … `pv4_voltage` | W / V | Per-string MPPT telemetry (string current omitted: unit is inconsistent on current firmware) | 1x | 60 |
+| **Integrated energy (Venus A only)** | `pv_energy_integrated`, `battery_energy_in_integrated`, `battery_energy_out_integrated` | kWh | Solar / charged / discharged energy accumulated from the derived powers (firmware counters are unusable on Venus A); survive restarts | 1x | 60 |
 | **Network** | `wifi_rssi` | dBm | Wi-Fi signal | 10x | 600 |
 |  | `wifi_ssid`, `wifi_ip`, `wifi_gateway`, `wifi_subnet`, `wifi_dns` | text | Wi-Fi configuration | 10x | 600 |
 | **Device info** | `device_model`, `firmware_version`, `ble_mac`, `wifi_mac`, `device_ip` | text | Identification fields | 10x | 600 |
@@ -279,8 +280,9 @@ solar. To feed the energy dashboard's battery section, create two
 - *Energy going in to the battery*: integrate `sensor.<device>_power_in` (method *Left*, unit prefix *k*)
 - *Energy coming out of the battery*: integrate `sensor.<device>_power_out` (method *Left*, unit prefix *k*)
 
-A third helper over `pv_power_es` gives solar production for the dashboard's
-solar section on Venus A.
+**Venus A needs no helpers**: the integration ships integrated counters —
+battery section: `battery_energy_in_integrated` / `battery_energy_out_integrated`,
+solar section: `pv_energy_integrated`.
 
 ## API maturity & known issues
 

@@ -28,6 +28,35 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Minimum V*I (W) needed before it can arbitrate the string power unit;
+# below this the deci-W/W candidates are too close to tell apart.
+PV_STRING_UNIT_MIN_REFERENCE = 25.0
+
+
+def _scale_pv_string_power(
+    compatibility: CompatibilityMatrix, pv_status: dict, string: int
+) -> float | None:
+    """Return pv{string}_power in W, disambiguating the per-string unit.
+
+    Venus A firmware mixes power units BETWEEN strings of the same response
+    (observed live on fw 148: pv1 in deci-W, pv2 in plain W). String voltage
+    and current are plain V/A, so V*I picks the right interpretation whenever
+    it is large enough to discriminate; otherwise fall back to the
+    compatibility matrix scaling (a few W of error at most, at dawn/dusk).
+    """
+    raw = pv_status.get(f"pv{string}_power")
+    if not isinstance(raw, (int, float)):
+        return None
+    fallback = compatibility.scale_value(raw, "pv_string_power")
+    voltage = pv_status.get(f"pv{string}_voltage")
+    current = pv_status.get(f"pv{string}_current")
+    if not isinstance(voltage, (int, float)) or not isinstance(current, (int, float)):
+        return fallback
+    reference = voltage * current
+    if reference < PV_STRING_UNIT_MIN_REFERENCE:
+        return fallback
+    return min((raw / 10.0, float(raw)), key=lambda candidate: abs(candidate - reference))
+
 
 class MarstekMultiDeviceCoordinator(DataUpdateCoordinator):
     """Class to manage fetching data from multiple Marstek devices."""
@@ -538,8 +567,8 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
                     for n in range(1, 5):
                         key = f"pv{n}_power"
                         if key in pv_status:
-                            pv_status[key] = self.compatibility.scale_value(
-                                pv_status[key], "pv_string_power"
+                            pv_status[key] = _scale_pv_string_power(
+                                self.compatibility, pv_status, n
                             )
                     data["pv"] = pv_status
                     self.category_last_updated["pv"] = time.time()

@@ -4,8 +4,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from custom_components.marstek_local_api.compatibility import CompatibilityMatrix
 from custom_components.marstek_local_api.coordinator import (
     MarstekDataUpdateCoordinator,
+    _scale_pv_string_power,
 )
 
 VENUS_A_DEVICE = {
@@ -33,7 +35,7 @@ def venus_a_es_status(ongrid=-812):
 
 
 def venus_a_pv_status():
-    # Raw per-string power in deci-W as returned by fw 148
+    # Raw per-string data as returned by fw 148 (power units differ per string!)
     return {
         "id": 0,
         "pv1_power": 3415, "pv1_voltage": 41, "pv1_current": 8, "pv1_state": 1,
@@ -100,13 +102,14 @@ async def test_venus_a_derives_pv_and_battery_power(hass):
 
     data = await coordinator._async_update_data()
 
-    # Per-string power scaled from deci-W at receipt
+    # Per-string unit disambiguated against V*I at receipt:
+    # pv1 raw 3415 @ 41V*8A=328 -> deci-W; pv2 raw 131 @ 42V*3A=126 -> plain W
     assert data["pv"]["pv1_power"] == 341.5
-    assert data["pv"]["pv2_power"] == 13.1
+    assert data["pv"]["pv2_power"] == 131.0
     # es.pv_power replaced by the string sum
-    assert data["es"]["pv_power"] == pytest.approx(354.6)
-    # Charging positive: importing 812 W + 354.6 W solar
-    assert data["es"]["bat_power"] == pytest.approx(354.6 + 812)
+    assert data["es"]["pv_power"] == pytest.approx(472.5)
+    # Charging positive: importing 812 W + 472.5 W solar
+    assert data["es"]["bat_power"] == pytest.approx(472.5 + 812)
 
 
 async def test_venus_a_pv_fallback_on_dropped_poll(hass):
@@ -129,8 +132,9 @@ async def test_venus_a_pv_fallback_on_dropped_poll(hass):
 
     # Strings kept from the first poll, not re-scaled a second time
     assert second["pv"]["pv1_power"] == 341.5
-    assert second["es"]["pv_power"] == pytest.approx(354.6)
-    assert second["es"]["bat_power"] == pytest.approx(354.6 + 812)
+    assert second["pv"]["pv2_power"] == 131.0
+    assert second["es"]["pv_power"] == pytest.approx(472.5)
+    assert second["es"]["bat_power"] == pytest.approx(472.5 + 812)
 
 
 async def test_venus_a_ac_only_when_no_pv_data(hass):
@@ -197,3 +201,31 @@ async def test_staleness_pv_medium_tier_on_venus_d(hass):
 
     coordinator.category_last_updated = {"pv": time.time() - 250}
     assert coordinator.is_category_fresh("pv")
+
+
+class TestPvStringUnitDisambiguation:
+    """Venus A fw 148 mixes deci-W and plain W between strings (live-observed)."""
+
+    compat = CompatibilityMatrix("Venus A", 148)
+
+    def test_deci_watt_string(self):
+        # live sample: raw 541 @ 47V*1A -> 54.1 W
+        pv = {"pv1_power": 541, "pv1_voltage": 47, "pv1_current": 1}
+        assert _scale_pv_string_power(self.compat, pv, 1) == 54.1
+
+    def test_plain_watt_string(self):
+        # live sample: raw 323 @ 40V*7A=280 -> 323 W (app shows 324)
+        pv = {"pv2_power": 323, "pv2_voltage": 40, "pv2_current": 7}
+        assert _scale_pv_string_power(self.compat, pv, 2) == 323.0
+
+    def test_low_reference_falls_back_to_matrix(self):
+        # V*I too small to discriminate -> matrix scaling (deci-W)
+        pv = {"pv1_power": 40, "pv1_voltage": 45, "pv1_current": 0}
+        assert _scale_pv_string_power(self.compat, pv, 1) == 4.0
+
+    def test_missing_voltage_falls_back_to_matrix(self):
+        pv = {"pv1_power": 541}
+        assert _scale_pv_string_power(self.compat, pv, 1) == 54.1
+
+    def test_missing_power_returns_none(self):
+        assert _scale_pv_string_power(self.compat, {}, 1) is None

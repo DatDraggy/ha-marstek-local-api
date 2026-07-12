@@ -134,9 +134,9 @@ Venus A response (per string, observed on fw 148):
 
 | Field | Type | Sensor | Description |
 |-------|------|--------|-------------|
-| pv1_power … pv4_power | number | ✅ Sensor | String power in **deci-W** (scaled ÷10 by the compatibility matrix) |
+| pv1_power … pv4_power | number | ✅ Sensor | String power — **unit differs per string** (fw 148: pv1 deci-W, pv2 plain W). The coordinator disambiguates each string against V×I (`_scale_pv_string_power`), falling back to the matrix ÷10 when V×I is too small to discriminate |
 | pv1_voltage … pv4_voltage | number | ✅ Sensor | String voltage (V) |
-| pv1_current … pv4_current | number | ❌ | Unit inconsistent between strings on current firmware — not exposed |
+| pv1_current … pv4_current | number | ❌ | String current, plain A truncated to integer (1 A resolution) — too coarse to expose |
 | pv1_state … pv4_state | number | ❌ | 1 = string active, 0 = inactive |
 
 On Venus A the coordinator polls PV on the fast tier (every update): the string
@@ -438,8 +438,9 @@ Options:
 | Venus D | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Venus A | ✅ | ✅ | ✅ | ✅ (no voltage/current/error_code) | ✅ (per string) | ✅ (no bat_power; pv/load energy always 0) | ✅ (no parse_state) |
 
-Venus A reports plain units (W / Wh / °C) for every field; its per-string PV
-power is deci-W. See the `"A"` hardware profile in `compatibility.py`.
+Venus A reports plain units (W / Wh / °C) for every field except per-string PV
+power, whose unit differs per string and is disambiguated against V×I. See the
+`"A"` hardware profile in `compatibility.py` and `_scale_pv_string_power`.
 
 ---
 

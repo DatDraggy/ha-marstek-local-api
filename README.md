@@ -87,7 +87,7 @@ After setup you can return to **Settings → Devices & Services → Marstek Loca
 |  | `ct_total_power` | W | CT aggregate | 5x | 300 |
 | **Mode** | `operating_mode` | text | Current mode (read-only sensor) | 5x | 300 |
 | **PV (Venus D only)** | `pv_power`, `pv_voltage`, `pv_current` | W / V / A | MPPT telemetry | 5x | 300 |
-| **PV strings (Venus A only)** | `pv1_power` … `pv4_power`, `pv1_voltage` … `pv4_voltage` | W / V | Per-string MPPT telemetry (string current omitted: unit is inconsistent on current firmware) | 1x | 60 |
+| **PV strings (Venus A only)** | `pv1_power` … `pv4_power`, `pv1_voltage` … `pv4_voltage` | W / V | Per-string MPPT telemetry. Firmware reports string power in different units per string; the integration resolves this against V×I (current omitted: integer-A resolution) | 1x | 60 |
 | **Integrated energy (Venus A only)** | `pv_energy_integrated`, `battery_energy_in_integrated`, `battery_energy_out_integrated` | kWh | Solar / charged / discharged energy accumulated from the derived powers (firmware counters are unusable on Venus A); survive restarts | 1x | 60 |
 | **Network** | `wifi_rssi` | dBm | Wi-Fi signal | 10x | 600 |
 |  | `wifi_ssid`, `wifi_ip`, `wifi_gateway`, `wifi_subnet`, `wifi_dns` | text | Wi-Fi configuration | 10x | 600 |
@@ -303,6 +303,7 @@ Venus A specifics (observed on firmware v148):
 - The device silently drops a large share of UDP requests (no error reply). The integration's retries usually get through, but occasional command timeouts and rejected writes (`set_result: false` while the device is busy) are normal — retry the service call.
 - `ES.GetStatus` does not include `bat_power` and always reports `pv_power`/`total_pv_energy` as 0. The integration derives battery power and solar power from `PV.GetStatus` and the grid flows instead.
 - `Bat.GetStatus` has no voltage/current/error-code fields, and `EM.GetStatus` has no `parse_state` — the corresponding entities are not created for Venus A.
+- `PV.GetStatus` reports string power in different units per string (observed: pv1 in deci-W, pv2 in plain W on the same response). The integration cross-checks each string against its voltage × current to pick the right unit.
 - The `wifi_mac` reported by the device can be the MAC of your access point rather than the battery's own WiFi module.
 
 Most of these issues are resolved by updating the device to the latest firmware — Marstek staggers rollouts, so many systems still run older versions. The Local API is evolving quickly and should stabilise as updates are deployed.

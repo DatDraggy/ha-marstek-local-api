@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import logging
 
 from homeassistant.components.sensor import (
@@ -26,6 +26,7 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .compatibility import HW_VERSION_VENUS_A
 from .const import DATA_COORDINATOR, DEVICE_MODEL_VENUS_D, DOMAIN
 from .coordinator import MarstekDataUpdateCoordinator, MarstekMultiDeviceCoordinator
 
@@ -406,6 +407,70 @@ PV_SENSOR_TYPES: tuple[MarstekSensorEntityDescription, ...] = (
     ),
 )
 
+# Per-string PV sensors (Venus A reports pv1..pv4_power/_voltage in
+# PV.GetStatus instead of the single pv_power/pv_voltage of Venus D).
+# String current is intentionally omitted: the unit reported by live
+# Venus A hardware is inconsistent between strings.
+PV_STRING_SENSOR_TYPES: tuple[MarstekSensorEntityDescription, ...] = tuple(
+    description
+    for string in range(1, 5)
+    for description in (
+        MarstekSensorEntityDescription(
+            key=f"pv{string}_power",
+            name=f"PV string {string} power",
+            native_unit_of_measurement=UnitOfPower.WATT,
+            device_class=SensorDeviceClass.POWER,
+            state_class=SensorStateClass.MEASUREMENT,
+            value_fn=lambda data, key=f"pv{string}_power": data.get("pv", {}).get(key),
+            category="pv",
+        ),
+        MarstekSensorEntityDescription(
+            key=f"pv{string}_voltage",
+            name=f"PV string {string} voltage",
+            native_unit_of_measurement=UnitOfElectricPotential.VOLT,
+            device_class=SensorDeviceClass.VOLTAGE,
+            state_class=SensorStateClass.MEASUREMENT,
+            value_fn=lambda data, key=f"pv{string}_voltage": data.get("pv", {}).get(key),
+            category="pv",
+        ),
+    )
+)
+
+# Fields Venus A firmware never includes in its responses (no
+# bat_voltage/bat_current/error_code in Bat.GetStatus, no parse_state in
+# EM.GetStatus) - creating these sensors would leave them permanently unknown.
+VENUS_A_UNSUPPORTED_KEYS = {
+    "battery_voltage",
+    "battery_current",
+    "battery_error_code",
+    "ct_parse_state",
+}
+
+# Energy counters Venus A firmware hardcodes to 0. Created disabled by
+# default so they stay discoverable in case a firmware update fixes them.
+VENUS_A_ZERO_COUNTER_KEYS = {
+    "total_pv_energy",
+    "total_load_energy",
+}
+
+
+def _standard_sensor_types(
+    coordinator: MarstekDataUpdateCoordinator,
+) -> tuple[MarstekSensorEntityDescription, ...]:
+    """Return SENSOR_TYPES adjusted for the device model."""
+    if coordinator.compatibility.hardware_version != HW_VERSION_VENUS_A:
+        return SENSOR_TYPES
+
+    descriptions = []
+    for description in SENSOR_TYPES:
+        if description.key in VENUS_A_UNSUPPORTED_KEYS:
+            continue
+        if description.key in VENUS_A_ZERO_COUNTER_KEYS:
+            description = replace(description, entity_registry_enabled_default=False)
+        descriptions.append(description)
+    return tuple(descriptions)
+
+
 # Aggregate sensors (multi-device only)
 AGGREGATE_SENSOR_TYPES: tuple[MarstekSensorEntityDescription, ...] = (
     MarstekSensorEntityDescription(
@@ -560,7 +625,7 @@ async def async_setup_entry(
             device_data = next(d for d in coordinator.devices if (d.get("ble_mac") or d.get("wifi_mac")) == mac)
 
             # Add standard sensors for this device
-            for description in SENSOR_TYPES:
+            for description in _standard_sensor_types(device_coordinator):
                 entities.append(
                     MarstekMultiDeviceSensor(
                         coordinator=coordinator,
@@ -574,6 +639,18 @@ async def async_setup_entry(
             # Add PV sensors if Venus D
             if device_coordinator.device_model == DEVICE_MODEL_VENUS_D:
                 for description in PV_SENSOR_TYPES:
+                    entities.append(
+                        MarstekMultiDeviceSensor(
+                            coordinator=coordinator,
+                            device_coordinator=device_coordinator,
+                            entity_description=description,
+                            device_mac=mac,
+                            device_data=device_data,
+                        )
+                    )
+            # Venus A reports per-string PV data instead
+            elif device_coordinator.compatibility.hardware_version == HW_VERSION_VENUS_A:
+                for description in PV_STRING_SENSOR_TYPES:
                     entities.append(
                         MarstekMultiDeviceSensor(
                             coordinator=coordinator,
@@ -602,7 +679,7 @@ async def async_setup_entry(
     else:
         # Single device mode (legacy)
         # Add standard sensors
-        for description in SENSOR_TYPES:
+        for description in _standard_sensor_types(coordinator):
             entities.append(
                 MarstekSensor(
                     coordinator=coordinator,
@@ -614,6 +691,16 @@ async def async_setup_entry(
         # Add PV sensors if Venus D
         if coordinator.device_model == DEVICE_MODEL_VENUS_D:
             for description in PV_SENSOR_TYPES:
+                entities.append(
+                    MarstekSensor(
+                        coordinator=coordinator,
+                        entity_description=description,
+                        entry=entry,
+                    )
+                )
+        # Venus A reports per-string PV data instead
+        elif coordinator.compatibility.hardware_version == HW_VERSION_VENUS_A:
+            for description in PV_STRING_SENSOR_TYPES:
                 entities.append(
                     MarstekSensor(
                         coordinator=coordinator,

@@ -27,6 +27,11 @@ COMMAND_BACKOFF_FACTOR: Final = 2.0  # Multiplier for successive backoff delays
 COMMAND_BACKOFF_MAX: Final = 12.0  # Upper bound on backoff delay
 COMMAND_BACKOFF_JITTER: Final = 0.4  # Additional random jitter for backoff
 UNAVAILABLE_THRESHOLD: Final = 120  # Seconds before marking device unavailable
+# Circuit breaker: after this many consecutive update cycles without a single
+# response, reduce polling to one lightweight probe per cycle. Firmware whose
+# API task has wedged (observed on Venus A fw 148) can crash and lose its
+# settings when full retry barrages continue for hours.
+UNRESPONSIVE_CYCLE_THRESHOLD: Final = 3
 
 # API Methods
 METHOD_GET_DEVICE: Final = "Marstek.GetDevice"

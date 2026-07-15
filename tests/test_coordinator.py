@@ -229,3 +229,56 @@ class TestPvStringUnitDisambiguation:
 
     def test_missing_power_returns_none(self):
         assert _scale_pv_string_power(self.compat, {}, 1) is None
+
+
+class TestCircuitBreaker:
+    """Reduced polling pressure while the device answers nothing."""
+
+    @staticmethod
+    def dead_api():
+        api = MagicMock()
+        for name in (
+            "get_device_info", "get_es_status", "get_battery_status",
+            "get_pv_status", "get_em_status", "get_es_mode",
+            "get_wifi_status", "get_ble_status",
+        ):
+            setattr(api, name, AsyncMock(side_effect=TimeoutError("dead")))
+        return api
+
+    async def run_cycles(self, coordinator, n):
+        for _ in range(n):
+            coordinator.data = await coordinator._async_update_data()
+
+    async def test_reduces_to_single_probe_when_unresponsive(self, hass):
+        api = self.dead_api()
+        coordinator = make_coordinator(hass, api)
+
+        # first update + threshold full cycles
+        await self.run_cycles(coordinator, 4)
+        assert coordinator._consecutive_failed_cycles >= 3
+
+        es_before = api.get_es_status.await_count
+        bat_before = api.get_battery_status.await_count
+        await self.run_cycles(coordinator, 2)
+        # wedged cycles: exactly one es probe each, nothing else
+        assert api.get_es_status.await_count == es_before + 2
+        assert api.get_battery_status.await_count == bat_before
+        api.get_es_status.assert_awaited_with(timeout=5, max_attempts=1)
+
+    async def test_recovers_to_full_polling(self, hass):
+        api = self.dead_api()
+        coordinator = make_coordinator(hass, api)
+        await self.run_cycles(coordinator, 4)
+        assert coordinator._consecutive_failed_cycles >= 3
+
+        # device comes back
+        api.get_es_status = AsyncMock(side_effect=lambda **kw: dict(venus_a_es_status()))
+        api.get_battery_status = AsyncMock(side_effect=lambda **kw: dict(venus_a_battery_status()))
+        api.get_pv_status = AsyncMock(side_effect=lambda **kw: dict(venus_a_pv_status()))
+
+        coordinator.data = await coordinator._async_update_data()
+
+        assert coordinator._consecutive_failed_cycles == 0
+        # full cycle ran after the successful probe
+        assert api.get_battery_status.await_count == 1
+        assert coordinator.data["es"]["bat_power"] is not None

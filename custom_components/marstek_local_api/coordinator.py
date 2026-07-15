@@ -20,6 +20,7 @@ from .const import (
     DEFAULT_SCAN_INTERVAL,
     DEVICE_MODEL_VENUS_D,
     UPDATE_INTERVAL_FAST,
+    UNRESPONSIVE_CYCLE_THRESHOLD,
     UPDATE_INTERVAL_MEDIUM,
     UPDATE_INTERVAL_SLOW,
     METHOD_BATTERY_STATUS,
@@ -303,6 +304,9 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
         self._config_entry = config_entry
         self._device_mac = device_mac  # Used for multi-device mode to identify which device to update
 
+        # Circuit breaker state - consecutive cycles without any response
+        self._consecutive_failed_cycles = 0
+
         # Staleness tracking - track last successful update per category
         self.category_last_updated: dict[str, float] = {}
         self.STALENESS_THRESHOLD = 3  # missed updates before invalidation
@@ -503,6 +507,35 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
             def _command_delay() -> float:
                 """Back off a little between calls; go faster while probing initial contact."""
                 return 0.2 if is_first_update and not had_success else 1.0
+
+            # Circuit breaker: when the device has answered nothing for several
+            # full cycles its API task is likely wedged. Keep probing with a
+            # single lightweight request per cycle instead of the full tiered
+            # poll with retries - wedged firmware (observed on Venus A fw 148)
+            # can crash and lose its settings under hours of retry pressure.
+            if (
+                not is_first_update
+                and self._consecutive_failed_cycles >= UNRESPONSIVE_CYCLE_THRESHOLD
+            ):
+                try:
+                    await asyncio.sleep(_command_delay())
+                    probe = await self.api.get_es_status(timeout=5, max_attempts=1)
+                except Exception:
+                    probe = None
+                if not probe:
+                    self._consecutive_failed_cycles += 1
+                    if self._consecutive_failed_cycles % 10 == 0:
+                        _LOGGER.warning(
+                            "Device unresponsive for %d polling cycles; polling stays "
+                            "reduced to one probe per cycle",
+                            self._consecutive_failed_cycles,
+                        )
+                    return data
+                _LOGGER.info(
+                    "Device answering again after %d unresponsive cycles; resuming normal polling",
+                    self._consecutive_failed_cycles,
+                )
+                self._consecutive_failed_cycles = 0
 
             if is_first_update:
                 _LOGGER.debug("First update - fetching device info")
@@ -709,6 +742,19 @@ class MarstekDataUpdateCoordinator(DataUpdateCoordinator):
                 _LOGGER.warning(
                     "First update did not receive any data from device; continuing setup and retrying in background"
                 )
+
+            # Track consecutive all-failed cycles for the circuit breaker
+            if had_success:
+                self._consecutive_failed_cycles = 0
+            else:
+                self._consecutive_failed_cycles += 1
+                if self._consecutive_failed_cycles == UNRESPONSIVE_CYCLE_THRESHOLD:
+                    _LOGGER.warning(
+                        "No response to any command for %d consecutive cycles; "
+                        "reducing polling to one probe per cycle to avoid "
+                        "pressuring the device",
+                        self._consecutive_failed_cycles,
+                    )
 
             # If we got any new data, update the last message timestamp
             # (We compare with the preserved old data to see if anything changed)
